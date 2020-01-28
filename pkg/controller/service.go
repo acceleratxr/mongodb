@@ -235,10 +235,19 @@ func (c *Controller) ensureMongoGvrSvc(mongodb *api.MongoDB) error {
 			}
 		}
 		// create configsvr governing service
-		return svcFunc(mongodb.GvrSvcName(
+		if err := svcFunc(mongodb.GvrSvcName(
 			mongodb.ConfigSvrNodeName()),
 			mongodb.ConfigSvrLabels(),
 			mongodb.ConfigSvrSelectors(),
+		); err != nil {
+			return err
+		}
+
+		// create mongos governing service
+		return svcFunc(mongodb.GvrSvcName(
+			mongodb.MongosNodeName()),
+			mongodb.MongosLabels(),
+			mongodb.MongosSelectors(),
 		)
 	}
 	// create mongodb governing service
@@ -247,4 +256,36 @@ func (c *Controller) ensureMongoGvrSvc(mongodb *api.MongoDB) error {
 		mongodb.OffshootLabels(),
 		mongodb.OffshootSelectors(),
 	)
+}
+
+func (c *Controller) getServiceHosts(mongoDB *api.MongoDB) ([]string, []string, error) {
+	service, err := c.Client.CoreV1().Services(mongoDB.Namespace).Get(mongoDB.Name, metav1.GetOptions{})
+	if err != nil {
+		return []string{}, []string{}, err
+	}
+
+	dnsNames := []string{
+		api.LocalHost,
+		mongoDB.Name,
+		c.getServiceURL(mongoDB),
+		fmt.Sprintf("%v.%v", mongoDB.Name, mongoDB.GvrSvcName(mongoDB.Name)),
+		fmt.Sprintf("%v.%v.%v.svc", mongoDB.Name, mongoDB.GvrSvcName(mongoDB.Name), mongoDB.Namespace),
+		fmt.Sprintf("%v.%v.%v.svc.cluster.local", mongoDB.Name, mongoDB.GvrSvcName(mongoDB.Name), mongoDB.Namespace),
+	}
+	ipAddresses := []string{api.LocalHostIP}
+	serviceIngress := service.Status.LoadBalancer.Ingress
+	if len(serviceIngress) > 0 {
+		for _, ingresItem := range serviceIngress {
+			if ingresItem.Hostname != "" {
+				dnsNames = append(dnsNames, ingresItem.Hostname)
+			} else if ingresItem.IP != "" {
+				ipAddresses = append(ipAddresses, ingresItem.IP)
+			}
+		}
+	}
+	return dnsNames, ipAddresses, nil
+}
+
+func (c *Controller) getServiceURL(mongoDB *api.MongoDB) string {
+	return mongoDB.Name + "." + mongoDB.Namespace + ".svc"
 }

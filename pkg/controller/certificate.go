@@ -23,9 +23,66 @@ import (
 
 	api "kubedb.dev/apimachinery/apis/kubedb/v1alpha1"
 
+	"github.com/appscode/go/log"
+	cm_api "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
 	"github.com/pkg/errors"
 	"gomodules.xyz/cert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func (c *Controller) manageTLS(mongodb *api.MongoDB) error {
+	if mongodb.Spec.TLS == nil {
+		return nil
+	}
+
+	if mongodb.Spec.TLS.IssuerRef.Kind == cm_api.IssuerKind {
+		_, err := c.CertManagerClient.CertmanagerV1alpha2().Issuers(mongodb.Namespace).Get(mongodb.Spec.TLS.IssuerRef.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Infoln(err)
+			return err
+		}
+	} else if mongodb.Spec.TLS.IssuerRef.Kind == cm_api.ClusterIssuerKind {
+		_, err := c.CertManagerClient.CertmanagerV1alpha2().ClusterIssuers().Get(mongodb.Spec.TLS.IssuerRef.Name, metav1.GetOptions{})
+		if err != nil {
+			log.Infoln(err)
+			return err
+		}
+	} else {
+		return errors.New("mongodb.Spec.TLS.Client.IssuerRef.Kind must be either Issuer or ClusterIssuer")
+	}
+
+	if mongodb.Spec.ReplicaSet == nil && mongodb.Spec.ShardTopology == nil {
+		// Standalone server
+		if err := c.manageStandaloneServerCert(mongodb); err != nil {
+			log.Infoln(err)
+			return err
+		}
+	} else if mongodb.Spec.ReplicaSet != nil && mongodb.Spec.ShardTopology == nil {
+		// ReplicaSet server
+		if err := c.manageCertSecretForReplicaSet(mongodb); err != nil {
+			log.Infoln(err)
+			return err
+		}
+	} else if mongodb.Spec.ShardTopology != nil {
+		// Shard Topology
+		if err := c.manageCertSecretsForShard(mongodb); err != nil {
+			log.Infoln(err)
+			return err
+		}
+	}
+	// for stash/user
+	if err := c.manageExternalClientCert(mongodb); err != nil {
+		log.Infoln(err)
+		return err
+	}
+	// for prometheus exporter
+	if err := c.manageExporterClientCert(mongodb); err != nil {
+		log.Infoln(err)
+		return err
+	}
+
+	return nil
+}
 
 // createCaCertificate returns generated caKey, caCert, err in order.
 func createCaCertificate() (*rsa.PrivateKey, *x509.Certificate, error) {

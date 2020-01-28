@@ -27,7 +27,7 @@ import (
 	ofst "kmodules.xyz/offshoot-api/api/v1"
 )
 
-func topologyInitContainer(
+func (c *Controller) topologyInitContainer(
 	mongodb *api.MongoDB,
 	mongodbVersion *catalog.MongoDBVersion,
 	podTemplate *ofst.PodTemplateSpec,
@@ -121,6 +121,10 @@ func topologyInitContainer(
 			{
 				Name:      configDirectoryName,
 				MountPath: configDirectoryPath,
+			},
+			{
+				Name:      certDirectoryName,
+				MountPath: api.MongoCertDirectory,
 			},
 			{
 				Name:      dataDirectoryName,

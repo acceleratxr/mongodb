@@ -23,10 +23,13 @@ import (
 	"kubedb.dev/apimachinery/client/clientset/versioned/typed/kubedb/v1alpha1/util"
 
 	"github.com/appscode/go/crypto/rand"
+	"github.com/appscode/go/types"
+	cm_api "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
 	"gomodules.xyz/cert"
 	core "k8s.io/api/core/v1"
 	kerr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	core_util "kmodules.xyz/client-go/core/v1"
 )
 
 const (
@@ -133,7 +136,7 @@ func (c *Controller) createCertificateSecret(mongodb *api.MongoDB) (*core.Secret
 		if err != nil {
 			return nil, err
 		}
-		clientPem, err := createClientPEMCertificate(mongodb, caKey, caCert)
+		clientPem, err := createClientPEMCertificate(mongodb, caKey, caCert) // pem has both client cert and key
 		if err != nil {
 			return nil, err
 		}
@@ -148,16 +151,16 @@ func (c *Controller) createCertificateSecret(mongodb *api.MongoDB) (*core.Secret
 				KeyForKeyFile: base64Token,
 			},
 			Data: map[string][]byte{
-				string(api.MongoTLSKeyFileName):    cert.EncodePrivateKeyPEM(caKey),
-				string(api.MongoTLSCertFileName):   cert.EncodeCertPEM(caCert),
-				string(api.MongoClientPemFileName): clientPem,
+				string(api.MongoTLSKeyFileName):  cert.EncodePrivateKeyPEM(caKey),
+				string(api.MongoTLSCertFileName): cert.EncodeCertPEM(caCert),
+				string(api.MongoPemFileName):     clientPem,
 			},
 		}
 
 		// add mongo.pem (for standalone) in secret, only if the db id standalone
 		if mongodb.Spec.ReplicaSet == nil &&
 			mongodb.Spec.ShardTopology == nil {
-			secret.Data[string(api.MongoServerPemFileName)] = svrPem
+			secret.Data[string(api.MongoPemFileName)] = svrPem
 		}
 
 		if _, err := c.Client.CoreV1().Secrets(mongodb.Namespace).Create(secret); err != nil {
@@ -182,4 +185,40 @@ func (c *Controller) checkSecret(secretName string, mongodb *api.MongoDB) (*core
 		return nil, fmt.Errorf(`intended secret "%v/%v" already exists`, mongodb.Namespace, secretName)
 	}
 	return secret, nil
+}
+
+func (c *Controller) getSecret(meta metav1.ObjectMeta) error {
+	_, err := c.Client.CoreV1().Secrets(meta.Namespace).Get(meta.Name, metav1.GetOptions{})
+	return err
+}
+
+func (c *Controller) AddOwnerReferenceToGeneratedSecret(mongoDB *api.MongoDB, secretMeta metav1.ObjectMeta) error {
+	var refs []*metav1.OwnerReference
+	certificate, err := c.CertManagerClient.CertmanagerV1alpha2().Certificates(secretMeta.Namespace).Get(secretMeta.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	ref1 := metav1.NewControllerRef(certificate, cm_api.SchemeGroupVersion.WithKind(cm_api.CertificateKind))
+	ref1.Controller = types.BoolP(false)
+	ref1.BlockOwnerDeletion = types.BoolP(false)
+	refs = append(refs, ref1)
+
+	ref2 := metav1.NewControllerRef(mongoDB, api.SchemeGroupVersion.WithKind(api.ResourceKindMongoDB))
+	refs = append(refs, ref2)
+
+	secret, err := c.Client.CoreV1().Secrets(secretMeta.Namespace).Get(secretMeta.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	for _, ref := range refs {
+		core_util.EnsureOwnerReference(&secret.ObjectMeta, ref)
+	}
+
+	_, _, err = core_util.CreateOrPatchSecret(c.Client, secret.ObjectMeta, func(in *core.Secret) *core.Secret {
+		return secret
+	})
+
+	return err
 }

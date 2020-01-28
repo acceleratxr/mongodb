@@ -85,6 +85,12 @@ func (c *Controller) create(mongodb *api.MongoDB) error {
 		}
 	}
 
+	// create or patch Certificates
+	if err := c.manageTLS(mongodb); err != nil {
+		log.Infoln(err)
+		return err
+	}
+
 	// ensure database StatefulSet
 	vt2, err := c.ensureMongoDBNode(mongodb)
 	if err != nil {
